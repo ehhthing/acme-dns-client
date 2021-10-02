@@ -37,12 +37,21 @@ fn main() {
             .short('s')
             .long("staging")
             .about("Use the staging Let's Encrypt certificate authority (for testing)"))
+        .arg(Arg::new("altnames")
+            .short('a')
+            .long("altnames")
+            .about("Alternative names")
+            .takes_value(true))
         .get_matches();
 
     let staging = args.is_present("staging");
     let domain = args.value_of("domain").unwrap();
     let email = args.value_of("email").unwrap();
     let output_directory = args.value_of("output").unwrap();
+
+    let altnames = args.value_of("altnames")
+                             .map(|names| names.split(",").collect())
+                             .unwrap_or(Vec::new());
 
     println!("Ordering certificate for {} using email {} from Let's Encrypt{}...",
               domain,
@@ -53,24 +62,27 @@ fn main() {
 
     let mut order = Directory::from_url(FilePersist::new(output_directory, domain), url).unwrap()
                      .account(email).unwrap()
-                     .new_order(domain, &[]).unwrap();
+                     .new_order(domain, &altnames).unwrap();
 
     let csr = loop {
         if let Some(csr) = order.confirm_validations() {
             break csr;
         }
 
-        let challenge = order.authorizations().unwrap()[0].dns_challenge();
+        for authorization in order.authorizations().unwrap() {
+            let challenge = authorization.dns_challenge();
+            
+            println!("DNS validation required; starting DNS server...");
 
-        println!("DNS validation required; starting DNS server...");
+            let dns_kill_tx = dns::start_responding_with(challenge.dns_proof());
+            challenge.validate(5000).unwrap();
+            dns_kill_tx.send(()).unwrap();
 
-        let dns_kill_tx = dns::start_responding_with(challenge.dns_proof());
-        challenge.validate(5000).unwrap();
-        dns_kill_tx.send(()).unwrap();
+            println!("DNS validation complete.");
+            order.refresh().unwrap();
+        }
 
-        println!("DNS validation complete.");
-
-        order.refresh().unwrap();
+        
     };
 
     let certificate = csr.finalize_pkey(create_p384_key(), 5000).unwrap().download_and_save_cert().unwrap();
